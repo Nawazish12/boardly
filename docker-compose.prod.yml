@@ -1,0 +1,76 @@
+# Local PRODUCTION-PARITY stack.
+#
+# Runs the prod-target images (immutable, non-root, no bind mounts, no hot
+# reload) so you can smoke-test exactly what ships to AWS — BEFORE it ships.
+# This is a local verification tool only; AWS runs these images via ECS task
+# definitions, not via compose.
+#
+#   docker compose -f docker-compose.prod.yml up --build
+#
+# NOTE on /api: in real prod the ALB routes /api/* -> backend and /* -> frontend
+# (same origin). There is no ALB locally, so the nginx frontend (:8080) does not
+# proxy /api. To exercise the API locally, hit the backend directly on :5000.
+# Full frontend->/api integration is validated in AWS, where the ALB does the
+# path routing.
+
+services:
+  frontend:
+    build:
+      context: ./frontend
+      target: prod
+    image: boardly-frontend:local-prod
+    ports:
+      - "8080:80"
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  backend:
+    build:
+      context: ./backend
+      target: prod
+    image: boardly-backend:local-prod
+    ports:
+      - "5000:5000"
+    env_file:
+      - ./backend/.env
+    environment:
+      # `environment` overrides anything in the .env file.
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: ./backend
+      target: prod
+    image: boardly-backend:local-prod
+    # Same image as backend; command overridden to run the BullMQ worker.
+    command: ["node", "src/worker.js"]
+    env_file:
+      - ./backend/.env
+    environment:
+      - NODE_ENV=production
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    command: redis-server --appendonly yes
+    # No published ports — internal only, matching the prod security model.
+    volumes:
+      - redis_prod_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+volumes:
+  redis_prod_data:
