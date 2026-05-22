@@ -17,6 +17,17 @@ async function start() {
     const { default: apiRoutes } = await import("./routes/index.js");
 
     const app = express();
+    // CloudFront -> ALB -> here. Trust exactly one proxy hop so req.ip resolves
+    // to the real client IP (not the ALB node), making per-IP rate limiting correct.
+    app.set("trust proxy", 1);
+
+    // TEMP (trust-proxy verification): log resolved client IP for proxied requests.
+    app.use((req, _res, next) => {
+      if (req.headers["x-forwarded-for"]) {
+        console.log(`[ipcheck] ${req.method} ${req.path} ip=${req.ip} xff=${req.headers["x-forwarded-for"]}`);
+      }
+      next();
+    });
 
     app.use(helmet());
     app.use(cors({ origin: true }));
