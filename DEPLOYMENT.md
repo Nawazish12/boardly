@@ -228,8 +228,14 @@ feature/*  ──PR──►  develop  ──►  release/x.y.0  ──┐
 
 ### Pipeline stages
 
-1. **CI (every PR / push):** install → lint → unit tests → build the image → security scan
-   (`npm audit` + Trivy). Fails the build on high/critical findings. **No deploy.**
+1. **CI (every PR into / push to `develop`/`main`):** per changed service (monorepo path
+   filter, §2.1) → `npm ci` → lint/test (`--if-present`; not defined yet, so currently no-op)
+   → `npm audit --omit=dev --audit-level=high` → build the **prod-target** image → Trivy scan.
+   **Security-gate policy:** hard-fail on **CRITICAL** only (`--ignore-unfixed`); **HIGH** is
+   reported but **non-blocking** — base images carry fixable HIGH CVEs that we patch where we
+   can (`apk upgrade` at build time) but can't always eliminate without upstream rebuilds.
+   Trivy runs via the official `aquasec/trivy` image (no action-version dependency).
+   **No deploy, no AWS credentials in this workflow.**
 2. **Deploy to Staging (`develop` / `release/*`):** build the production image **once** →
    push to **ECR** → record its **immutable digest** (`sha256:…`) → register a staging
    task-definition revision pinned to that digest → ECS rolling update of the staging service.
