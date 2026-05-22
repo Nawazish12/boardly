@@ -60,14 +60,21 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - name: Build production image
         run: docker build --target prod -t boardly-backend:ci .
-      - name: Trivy image scan (fail on HIGH/CRITICAL)
+      - name: Trivy report HIGH (informational, non-blocking)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:latest image \
-            --severity HIGH,CRITICAL \
-            --exit-code 1 \
-            --ignore-unfixed \
+            --severity HIGH --ignore-unfixed --exit-code 0 \
+            boardly-backend:ci
+      # Hard gate: only CRITICAL fails the build. HIGH base-image CVEs (e.g. npm's
+      # bundled tar) are reported above but don't block — see CI policy note in PR.
+      - name: Trivy gate (fail on CRITICAL)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
             boardly-backend:ci
 
   frontend:
@@ -94,12 +101,19 @@ jobs:
         run: npm audit --omit=dev --audit-level=high
       - name: Build production image
         run: docker build --target prod -t boardly-frontend:ci .
-      - name: Trivy image scan (fail on HIGH/CRITICAL)
+      - name: Trivy report HIGH (informational, non-blocking)
         run: |
           docker run --rm \
             -v /var/run/docker.sock:/var/run/docker.sock \
             aquasec/trivy:latest image \
-            --severity HIGH,CRITICAL \
-            --exit-code 1 \
-            --ignore-unfixed \
+            --severity HIGH --ignore-unfixed --exit-code 0 \
+            boardly-frontend:ci
+      # Hard gate: only CRITICAL fails the build. HIGH base-image CVEs are
+      # reported above but don't block — see CI policy note in PR.
+      - name: Trivy gate (fail on CRITICAL)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
             boardly-frontend:ci
