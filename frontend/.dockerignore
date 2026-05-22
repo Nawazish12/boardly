@@ -1,0 +1,13 @@
+node_modules
+dist
+.git
+.gitignore
+*.md
+# Never bake secrets into the image (example file is harmless but excluded too).
+.env
+.env.*
+npm-debug.log*
+.vscode
+.DS_Store
+Dockerfile
+.dockerignore
