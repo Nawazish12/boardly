@@ -36,6 +36,17 @@ redis_data/
 dump.rdb
 appendonly.aof
 
+# ---- Terraform ----
+# Local state can contain sensitive values — NEVER commit it.
+**/.terraform/
+*.tfstate
+*.tfstate.*
+*.tfvars
+!*.tfvars.example
+crash.log
+crash.*.log
+# (We DO commit .terraform.lock.hcl to pin provider versions.)
+
 # ---- OS / editor ----
 .DS_Store
 Thumbs.db
