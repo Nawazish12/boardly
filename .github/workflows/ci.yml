@@ -1,0 +1,119 @@
+name: CI
+
+# Runs on every PR into develop/main and on pushes to those branches.
+# This is the QUALITY GATE only — it never deploys (no AWS credentials here).
+on:
+  pull_request:
+    branches: [develop, main]
+  push:
+    branches: [develop, main]
+
+# A newer commit on the same ref cancels the in-flight run.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Detect which service(s) changed so we only check what's affected (monorepo, §2.1).
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.filter.outputs.backend }}
+      frontend: ${{ steps.filter.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+              - '.github/workflows/ci.yml'
+            frontend:
+              - 'frontend/**'
+              - '.github/workflows/ci.yml'
+
+  backend:
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: backend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: backend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint --if-present
+      - name: Test
+        run: npm test --if-present
+      - name: Audit production deps (fail on high+)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Build production image
+        run: docker build --target prod -t boardly-backend:ci .
+      - name: Trivy report HIGH (informational, non-blocking)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH --ignore-unfixed --exit-code 0 \
+            boardly-backend:ci
+      # Hard gate: only CRITICAL fails the build. HIGH base-image CVEs (e.g. npm's
+      # bundled tar) are reported above but don't block — see CI policy note in PR.
+      - name: Trivy gate (fail on CRITICAL)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            boardly-backend:ci
+
+  frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Lint
+        run: npm run lint --if-present
+      - name: Test
+        run: npm test --if-present
+      - name: Audit production deps (fail on high+)
+        run: npm audit --omit=dev --audit-level=high
+      - name: Build production image
+        run: docker build --target prod -t boardly-frontend:ci .
+      - name: Trivy report HIGH (informational, non-blocking)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity HIGH --ignore-unfixed --exit-code 0 \
+            boardly-frontend:ci
+      # Hard gate: only CRITICAL fails the build. HIGH base-image CVEs are
+      # reported above but don't block — see CI policy note in PR.
+      - name: Trivy gate (fail on CRITICAL)
+        run: |
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            aquasec/trivy:latest image \
+            --severity CRITICAL --ignore-unfixed --exit-code 1 \
+            boardly-frontend:ci

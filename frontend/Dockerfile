@@ -32,6 +32,9 @@ RUN npm run build
 
 # ---------- Prod target: nginx serving the built assets ----------
 FROM nginx:1.27-alpine AS prod
+# Patch OS packages so the image picks up fixed OpenSSL etc. (closes fixable
+# CRITICAL/HIGH base-image CVEs that Trivy gates on).
+RUN apk update && apk upgrade --no-cache
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 COPY --from=build /app/dist /usr/share/nginx/html
 EXPOSE 80
