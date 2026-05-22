@@ -24,7 +24,7 @@ async function start() {
     app.use(generalLimiter);
 
     app.get("/health", (_req, res) => {
-      res.json({ ok: true, service: "backend" });
+      res.json({ ok: true, service: "backend", env: env.nodeEnv });
     });
 
     app.use("/api-docs", swaggerUi.serve, swaggerUi.setup(swaggerSpec));
