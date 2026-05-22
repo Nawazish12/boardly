@@ -14,9 +14,9 @@ resource "aws_security_group" "staging_alb" {
   vpc_id      = data.aws_vpc.default.id
 
   ingress {
-    description = "HTTPS in (TODO: restrict to CloudFront prefix list later)"
-    from_port   = 443
-    to_port     = 443
+    description = "HTTP from CloudFront (CloudFront serves HTTPS to users; TODO restrict to CloudFront prefix list)"
+    from_port   = 80
+    to_port     = 80
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
