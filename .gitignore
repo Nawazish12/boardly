@@ -1,0 +1,46 @@
+# ---- Secrets / environment (NEVER commit) ----
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+aws-credentials*
+**/secrets/
+
+# ---- Dependencies ----
+node_modules/
+**/node_modules/
+
+# ---- Build output ----
+dist/
+build/
+frontend/dist/
+backend/dist/
+*.tsbuildinfo
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ---- Runtime / data ----
+*.pid
+*.seed
+coverage/
+.nyc_output/
+redis_data/
+dump.rdb
+appendonly.aof
+
+# ---- OS / editor ----
+.DS_Store
+Thumbs.db
+.idea/
+*.swp
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
