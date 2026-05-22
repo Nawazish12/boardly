@@ -106,5 +106,11 @@ resource "aws_ecs_service" "staging" {
     container_port   = 5000
   }
 
+  # Terraform sets the service up once; the CI/CD pipeline rolls out new task-def
+  # revisions (new image per commit). Ignore those so Terraform doesn't revert deploys.
+  lifecycle {
+    ignore_changes = [task_definition, desired_count]
+  }
+
   depends_on = [aws_lb_listener.staging_http]
 }

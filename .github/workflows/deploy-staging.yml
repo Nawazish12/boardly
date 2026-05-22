@@ -1,0 +1,96 @@
+name: Deploy Staging
+
+# Runs after a merge to develop. Path-filtered: only the changed service deploys.
+on:
+  push:
+    branches: [develop]
+
+concurrency:
+  group: deploy-staging
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE: arn:aws:iam::121416078816:role/boardly-staging-github-deploy
+  ECR_REPO: 121416078816.dkr.ecr.us-east-1.amazonaws.com/boardly-backend
+  ECS_CLUSTER: boardly-staging
+  ECS_SERVICE: boardly-staging
+  S3_BUCKET: boardly-staging-web-121416078816
+  CF_DIST_ID: E2P0JILSG4WVR8
+
+jobs:
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      backend: ${{ steps.f.outputs.backend }}
+      frontend: ${{ steps.f.outputs.frontend }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dorny/paths-filter@v3
+        id: f
+        with:
+          filters: |
+            backend:
+              - 'backend/**'
+            frontend:
+              - 'frontend/**'
+
+  deploy-backend:
+    needs: changes
+    if: ${{ needs.changes.outputs.backend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Build & push backend image
+        run: |
+          TAG=${GITHUB_SHA::7}
+          docker build --target prod -t "$ECR_REPO:$TAG" ./backend
+          docker push "$ECR_REPO:$TAG"
+          echo "IMAGE=$ECR_REPO:$TAG" >> "$GITHUB_ENV"
+      - name: Register new task definition & roll the service
+        run: |
+          aws ecs describe-task-definition --task-definition "$ECS_SERVICE" \
+            --query taskDefinition > td.json
+          # backend AND worker share the image; swap both, strip read-only fields.
+          jq --arg img "$IMAGE" '
+            .containerDefinitions |= map(if (.name=="backend" or .name=="worker") then .image=$img else . end)
+            | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+          ' td.json > new-td.json
+          NEW_TD=$(aws ecs register-task-definition --cli-input-json file://new-td.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TD" >/dev/null
+          echo "Rolling out $NEW_TD ..."
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          echo "Backend deployed."
+
+  deploy-frontend:
+    needs: changes
+    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Build SPA (Docker build stage) & extract dist
+        run: |
+          docker build --target build -t fe-build ./frontend
+          id=$(docker create fe-build)
+          docker cp "$id:/app/dist" ./dist
+          docker rm "$id" >/dev/null
+      - name: Sync to S3 & invalidate CloudFront
+        run: |
+          aws s3 sync ./dist "s3://$S3_BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$CF_DIST_ID" --paths "/*"
+          echo "Frontend deployed."
