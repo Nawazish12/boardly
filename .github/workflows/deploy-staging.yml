@@ -74,8 +74,8 @@ jobs:
           echo "Backend deployed."
 
   deploy-frontend:
-    needs: changes
-    if: ${{ needs.changes.outputs.frontend == 'true' }}
+    needs: [changes, deploy-backend]
+    if: ${{ needs.changes.outputs.frontend == 'true' && (needs.changes.outputs.backend != 'true' || needs.deploy-backend.result == 'success') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
