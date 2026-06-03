@@ -1,5 +1,12 @@
 # Changelog
 
+## v0.2.1 - 2026-06-03
+
+- changes (9334e11)
+- Merge branch 'develop' into main (740406c)
+- changes in workflew (2f44750)
+
+
 ## v0.2.0 - 2026-06-03
 
 - Merge pull request #11 from Nawazish12/develop (4dc9493)
