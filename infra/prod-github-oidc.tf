@@ -11,11 +11,13 @@ data "aws_iam_policy_document" "github_assume_prod" {
       variable = "token.actions.githubusercontent.com:aud"
       values   = ["sts.amazonaws.com"]
     }
-    # main branch or version tags of this repo
+    # Production workflow uses GitHub Environment protection. OIDC `sub`
+    # becomes environment-based for those jobs. Keep ref patterns too.
     condition {
       test     = "StringLike"
       variable = "token.actions.githubusercontent.com:sub"
       values = [
+        "repo:${var.github_repo}:environment:production",
         "repo:${var.github_repo}:ref:refs/heads/main",
         "repo:${var.github_repo}:ref:refs/tags/v*",
       ]
