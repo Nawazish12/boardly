@@ -1,0 +1,105 @@
+name: Deploy Production
+
+# Build-once / promote-by-tag. Backend is NOT rebuilt here: we promote the exact
+# image tag already validated in staging. Gated by the `production` GitHub
+# Environment, which requires manual approval before any prod change happens.
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Backend image tag to promote (the 7-char SHA already in ECR and tested in staging)'
+        required: false
+
+concurrency:
+  group: deploy-prod
+  cancel-in-progress: false
+
+permissions:
+  id-token: write # required for OIDC
+  contents: read
+
+env:
+  AWS_REGION: us-east-1
+  AWS_ROLE: arn:aws:iam::121416078816:role/boardly-prod-github-deploy
+  ECR_REPO: 121416078816.dkr.ecr.us-east-1.amazonaws.com/boardly-backend
+  ECS_CLUSTER: boardly-prod
+  ECS_SERVICE: boardly-prod
+  S3_BUCKET: boardly-prod-web-121416078816
+  CF_DIST_ID: E9H4SZJM1Z6DW
+
+jobs:
+  promote-backend:
+    runs-on: ubuntu-latest
+    environment: production # requires reviewer approval (configured in repo settings)
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve backend image tag
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+            if [ -z "$IMAGE_TAG" ]; then
+              echo "workflow_dispatch requires 'image_tag' input."
+              exit 1
+            fi
+          else
+            RELEASE_TAG="${{ github.event.release.tag_name }}"
+            RELEASE_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+            IMAGE_TAG="${RELEASE_SHA:0:7}"
+          fi
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Promoting image tag: $IMAGE_TAG"
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - uses: aws-actions/amazon-ecr-login@v2
+      - name: Verify image exists in ECR
+        run: |
+          aws ecr describe-images --repository-name boardly-backend \
+            --image-ids imageTag="${{ steps.resolve.outputs.image_tag }}" >/dev/null
+      - name: Register new task definition & roll the service
+        run: |
+          IMAGE="$ECR_REPO:${{ steps.resolve.outputs.image_tag }}"
+          aws ecs describe-task-definition --task-definition "$ECS_SERVICE" \
+            --query taskDefinition > td.json
+          # backend AND worker share the image; swap both, strip read-only fields.
+          jq --arg img "$IMAGE" '
+            .containerDefinitions |= map(if (.name=="backend" or .name=="worker") then .image=$img else . end)
+            | del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)
+          ' td.json > new-td.json
+          NEW_TD=$(aws ecs register-task-definition --cli-input-json file://new-td.json \
+            --query 'taskDefinition.taskDefinitionArn' --output text)
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "$NEW_TD" >/dev/null
+          echo "Rolling out $NEW_TD ..."
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          echo "Backend promoted to production."
+
+  deploy-frontend:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ env.AWS_ROLE }}
+          aws-region: ${{ env.AWS_REGION }}
+      - name: Build SPA (Docker build stage) & extract dist
+        run: |
+          docker build --target build -t fe-build ./frontend
+          id=$(docker create fe-build)
+          docker cp "$id:/app/dist" ./dist
+          docker rm "$id" >/dev/null
+      - name: Sync to S3 & invalidate CloudFront
+        run: |
+          aws s3 sync ./dist "s3://$S3_BUCKET" --delete
+          aws cloudfront create-invalidation --distribution-id "$CF_DIST_ID" --paths "/*"
+          echo "Frontend deployed to production."

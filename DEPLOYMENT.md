@@ -33,8 +33,8 @@ The same four-service stack we run locally, deployed per environment:
 
 | Service | Role | Network exposure |
 |---|---|---|
-| **frontend** | Vite/React UI | Public, via ALB (HTTPS) |
-| **backend** | Node REST API | Public, via ALB (HTTPS) — `/api` |
+| **frontend** | Vite/React SPA | Public, via **CloudFront + S3** (HTTPS) |
+| **backend** | Node REST API | Via **CloudFront `/api/*` → backend ALB** (HTTPS) |
 | **worker** | BullMQ job processor | **None** — internal only |
 | **redis** | Queue + cache backing BullMQ | **None** — internal Docker network only |
 
@@ -55,13 +55,14 @@ External managed services:
 
   | Changed paths | Deploys |
   |---|---|
-  | `frontend/**` only | frontend image only |
-  | `backend/**` only | backend **and** worker (worker reuses the backend image) |
+  | `frontend/**` only | frontend build → **S3 sync + CloudFront invalidation** |
+  | `backend/**` only | backend **and** worker (worker reuses the backend image) → **ECS** |
   | both | both |
 
-- **Each service has its own image and its own ECR repository** (`frontend`, `backend`). That
-  separation — plus path filters — is what gives independent versioning/deploys; the single git
-  repo does not couple them.
+- **Independent deploys per service, via different artifacts:** the **backend** ships a Docker
+  image to its own **ECR** repo (run by ECS); the **frontend** ships a built static bundle to
+  its **S3 bucket** (served by CloudFront). There is **no frontend image / ECR**. Path filters
+  plus separate artifacts give independent deploys; the single git repo does not couple them.
 - *Tag-triggered prod deploys* don't carry changed-path info as directly as branch pushes; the
   release promotes the images built for that release (resolved in the pipeline design, §7 /
   Phase 6). This does not change the monorepo decision.
@@ -75,12 +76,13 @@ account but isolated at every layer:
 
 | Layer | Staging | Production |
 |---|---|---|
-| EC2 instance | Instance A (t3.micro) | Instance B (t3.micro) |
-| ECS service | `staging` service | `prod` service |
-| Load balancer | Staging ALB | Production ALB |
+| Frontend hosting | S3 `…-staging-web` + CloudFront dist | S3 `…-prod-web` + CloudFront dist |
+| EC2 instance (backend/worker/redis) | Instance A (t3.micro) | Instance B (t3.micro) |
+| ECS service (backend only) | `staging` service | `prod` service |
+| Load balancer (backend only, CloudFront's `/api` origin) | Staging ALB | Production ALB |
 | Database | Atlas cluster `staging_db` | Atlas cluster `prod_db` |
 | Secrets path | `/staging/*` | `/prod/*` |
-| Domain | `staging.<your-domain>` | `<your-domain>` |
+| Domain | `staging.<your-domain>` → CloudFront | `<your-domain>` → CloudFront |
 | Deploy trigger | merge to `develop` | merge to `main` + version tag (with approval) |
 
 > **Single account, not two.** We deliberately do **not** create a second "free" AWS account
@@ -97,14 +99,21 @@ pulling images and reaching Atlas), but **all inbound access is locked down by S
 Groups** so they behave as if private — without paying for a NAT Gateway (~$32/mo saved).
 
 **Ingress path**
-1. Public HTTPS (443) hits the **Application Load Balancer**.
-2. ALB holds a **free ACM TLS certificate** and forwards to the instance.
-3. HTTP (80) is redirected to HTTPS.
+1. Public HTTPS (443) hits the per-environment **CloudFront distribution**.
+2. CloudFront serves the SPA from its **S3 origin** for `/*`, and routes `/api/*` to the
+   **backend ALB** origin — so the browser stays **same-origin** (no CORS).
+3. The backend **ALB** (CloudFront's `/api` origin) forwards to the ECS backend on the
+   instance. HTTP→HTTPS is enforced at CloudFront.
 
 **Security Group rules (the firewall core)**
-- **ALB SG:** inbound 443 from `0.0.0.0/0`; inbound 80 (redirect only).
+- **ALB SG:** inbound 443 — ideally restricted to **CloudFront only** (AWS-managed
+  `com.amazonaws.global.cloudfront.origin-facing` prefix list + a secret origin header the ALB
+  verifies), rather than `0.0.0.0/0`. This stops the ALB being hit directly, bypassing CloudFront.
 - **Instance SG:** inbound **only from the ALB's Security Group** (referenced by SG ID, not
-  IP). App ports (5173 / 5000 / 6379) are **never** exposed to the internet.
+  IP). App ports (5000 / 6379) are **never** exposed to the internet. (Frontend no longer runs
+  on the instance — it's static on S3.)
+- **S3 bucket:** **private** (no public access); reachable only by CloudFront via Origin Access
+  Control (OAC).
 - **Egress:** open, so the box can pull ECR images and reach Atlas + Resend.
 
 **No SSH — use AWS SSM Session Manager.**
@@ -228,8 +237,14 @@ feature/*  ──PR──►  develop  ──►  release/x.y.0  ──┐
 
 ### Pipeline stages
 
-1. **CI (every PR / push):** install → lint → unit tests → build the image → security scan
-   (`npm audit` + Trivy). Fails the build on high/critical findings. **No deploy.**
+1. **CI (every PR into / push to `develop`/`main`):** per changed service (monorepo path
+   filter, §2.1) → `npm ci` → lint/test (`--if-present`; not defined yet, so currently no-op)
+   → `npm audit --omit=dev --audit-level=high` → build the **prod-target** image → Trivy scan.
+   **Security-gate policy:** hard-fail on **CRITICAL** only (`--ignore-unfixed`); **HIGH** is
+   reported but **non-blocking** — base images carry fixable HIGH CVEs that we patch where we
+   can (`apk upgrade` at build time) but can't always eliminate without upstream rebuilds.
+   Trivy runs via the official `aquasec/trivy` image (no action-version dependency).
+   **No deploy, no AWS credentials in this workflow.**
 2. **Deploy to Staging (`develop` / `release/*`):** build the production image **once** →
    push to **ECR** → record its **immutable digest** (`sha256:…`) → register a staging
    task-definition revision pinned to that digest → ECS rolling update of the staging service.
@@ -237,6 +252,18 @@ feature/*  ──PR──►  develop  ──►  release/x.y.0  ──┐
    staging by referencing its digest** (no rebuild) → register a prod task-definition revision
    pinned to the same digest → ECS rolling update of the prod service. Gated by a **GitHub
    `production` Environment approval** (you click approve).
+
+### Frontend deploy — S3 + CloudFront (no image)
+Stages 2–3 above describe the **backend** path (Docker image → ECR → ECS). The **frontend**
+does not ship an image:
+
+- **Build** the SPA once (`npm run build`) on `develop`. The bundle is **env-agnostic** — it
+  calls relative `/api`, which CloudFront routes per environment — so the *same* bundle is
+  promoted to staging then prod (build-once-promote preserved).
+- **Deploy** = `aws s3 sync dist/ s3://…-web` → **CloudFront invalidation** (`/index.html` and
+  changed paths). Static assets are content-hashed so they're immutable; `index.html` is
+  invalidated so new deploys appear immediately.
+- **Rollback** = re-sync the previous bundle and invalidate (keep the prior build artifact).
 
 ### Image identity — promote by digest, tag for humans
 Two identifiers, with different guarantees:
@@ -311,8 +338,10 @@ backward-compatible (§8) so a rollback doesn't strand the database.
 
 ## 9. DNS & TLS
 
-- Custom domain with subdomains: `staging.<domain>` → Staging ALB, `<domain>` → Production ALB.
-- **Free ACM certificates** terminated at each ALB. HTTP→HTTPS redirect enforced.
+- Custom domain: `staging.<domain>` → Staging **CloudFront**, `<domain>` → Production CloudFront.
+- **ACM certs:** CloudFront requires its certificate in **`us-east-1`** (one per environment).
+  The backend **ALB** (CloudFront's `/api` origin) uses a **regional** ACM cert in the
+  deployment region. HTTP→HTTPS is enforced at CloudFront.
 
 ---
 
@@ -323,9 +352,11 @@ backward-compatible (§8) so a rollback doesn't strand the database.
 | Resource | Free cap / month | 10 days × 2 | Result |
 |---|---|---|---|
 | EC2 t3.micro | 750 hrs | 480 hrs | ✅ free |
-| ALB | 750 hrs | 480 hrs | ✅ free |
+| ALB (backend only) | 750 hrs | 480 hrs | ✅ free |
+| S3 storage | 5 GB | tiny SPA bundle | ✅ free |
+| CloudFront | 1 TB egress + 10M req (12 mo) | negligible | ✅ free |
 | EBS storage | 30 GB | small | ✅ free |
-| ECR storage | 500 MB | keep images slim | ✅ free |
+| ECR storage (backend only) | 500 MB | keep image slim | ✅ free |
 | Data egress | 100 GB | negligible | ✅ free |
 
 > If usage stretches toward **30 days**, two of everything 24/7 exceeds the 750-hour caps
@@ -333,13 +364,16 @@ backward-compatible (§8) so a rollback doesn't strand the database.
 > Caddy/Cloudflare TLS, or stop instances when idle.
 
 **Teardown checklist (run when the ~10 days are done):**
-1. Delete ECS services + cluster (stops tasks)
-2. Delete ALBs + target groups
-3. Terminate EC2 instances
-4. **Delete EBS volumes** (they survive instance termination — easy to forget)
-5. **Release any Elastic IPs** (an *unattached* EIP is billed even in free tier)
-6. Delete ECR images / repo
-7. Delete Atlas clusters (free, but keep it clean)
+1. **Disable then delete the CloudFront distributions** (disable first; deletion needs the
+   distribution disabled)
+2. **Empty + delete the S3 buckets** (frontend bundles)
+3. Delete ECS services + cluster (stops tasks)
+4. Delete ALBs + target groups
+5. Terminate EC2 instances
+6. **Delete EBS volumes** (they survive instance termination — easy to forget)
+7. **Release any Elastic IPs** (an *unattached* EIP is billed even in free tier)
+8. Delete ECR images / repo (backend)
+9. Delete Atlas clusters (free, but keep it clean)
 
 ---
 
@@ -348,10 +382,12 @@ backward-compatible (§8) so a rollback doesn't strand the database.
 1. **Dockerize** all four services for production (multi-stage, non-root); verify the stack
    runs against a local Redis container.
 2. **Provision data tier** — two isolated Atlas M0 clusters; capture connection strings.
-3. **AWS foundation** — VPC/subnets, Security Groups (ALB-only ingress), two ECS-optimized
-   t3.micro instances, two ALBs, ACM certs, domain records, SSM access.
-4. **ECS** — cluster + task definitions + `staging`/`prod` services (secrets via Parameter
-   Store references).
+3. **AWS foundation** — VPC/subnets, Security Groups (ALB locked to CloudFront), two
+   ECS-optimized t3.micro instances (backend/worker/redis), two **backend ALBs**, two **S3
+   buckets + CloudFront distributions** (frontend), ACM certs (CloudFront in `us-east-1`, ALB
+   regional), domain records, SSM access.
+4. **ECS (backend only)** — cluster + task definitions + `staging`/`prod` services (secrets via
+   Parameter Store references). Frontend is static on S3 — no ECS service.
 5. **Secrets & IAM** — populate Parameter Store; configure GitHub OIDC role + Environments.
 6. **Pipelines** — CI workflow, staging deploy, prod deploy (approval-gated); enable branch
    protection.

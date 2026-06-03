@@ -9,7 +9,7 @@ export default function AuthLayout({ title, subtitle, children, footer }) {
           <h2>Build with confidence</h2>
           <p>
             Secure authentication powered by your API. Sign in to access your
-            workspace and profile.
+            workspace and profile. checking for staging 
           </p>
         </div>
       </aside>
