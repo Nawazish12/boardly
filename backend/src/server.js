@@ -17,9 +17,11 @@ async function start() {
     const { default: apiRoutes } = await import("./routes/index.js");
 
     const app = express();
-    // CloudFront -> ALB -> here. Trust exactly one proxy hop so req.ip resolves
-    // to the real client IP (not the ALB node), making per-IP rate limiting correct.
-    app.set("trust proxy", 1);
+    // Request path in staging/prod is CloudFront -> ALB -> Express.
+    // Trust two proxy hops so req.ip resolves to the actual client IP.
+    // If this is lower, req.ip may resolve to CloudFront edges and rotate,
+    // causing auth rate-limits to trigger later than configured.
+    app.set("trust proxy", 2);
 
     // TEMP (trust-proxy verification): log resolved client IP for proxied requests.
     app.use((req, _res, next) => {
