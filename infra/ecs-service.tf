@@ -23,7 +23,7 @@ locals {
     { name = "NODE_ENV", value = "production" },
     { name = "PORT", value = "5000" },
     { name = "REDIS_URL", value = "redis://redis:6379" },
-    { name = "APP_URL", value = "https://${aws_cloudfront_distribution.staging.domain_name}" },
+    { name = "APP_URL", value = "https://staging.leadisa.com" },
     { name = "ACCESS_TOKEN_EXPIRES_IN", value = "15m" },
     { name = "REFRESH_TOKEN_EXPIRES_IN", value = "7d" },
     { name = "SUPER_ADMIN_NAME", value = "Super Admin" },

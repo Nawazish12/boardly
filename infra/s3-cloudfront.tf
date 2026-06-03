@@ -51,6 +51,7 @@ resource "aws_cloudfront_distribution" "staging" {
   default_root_object = "index.html"
   comment             = "${var.project} staging"
   price_class         = "PriceClass_100" # cheapest edge set; fine for a learning project
+  aliases             = ["staging.leadisa.com"]
 
   # Origin 1 — the SPA in private S3 (via OAC)
   origin {
@@ -115,7 +116,9 @@ resource "aws_cloudfront_distribution" "staging" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true # free HTTPS on *.cloudfront.net
+    acm_certificate_arn      = "arn:aws:acm:us-east-1:121416078816:certificate/3646f693-0fe2-475c-a892-126db9dcd448"
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
   }
 }
 

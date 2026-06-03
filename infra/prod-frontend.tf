@@ -44,6 +44,7 @@ resource "aws_cloudfront_distribution" "prod" {
   default_root_object = "index.html"
   comment             = "${var.project} prod"
   price_class         = "PriceClass_100"
+  aliases             = ["app.leadisa.com"]
 
   origin {
     origin_id                = local.prod_s3_origin_id
@@ -104,7 +105,9 @@ resource "aws_cloudfront_distribution" "prod" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = true
+    acm_certificate_arn      = "arn:aws:acm:us-east-1:121416078816:certificate/3646f693-0fe2-475c-a892-126db9dcd448"
+    ssl_support_method       = "sni-only"
+    minimum_protocol_version = "TLSv1.2_2021"
   }
 }
 
