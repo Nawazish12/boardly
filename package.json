@@ -1,0 +1,8 @@
+{
+  "name": "boardly",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "release": "bash scripts/release.sh"
+  }
+}

@@ -4,11 +4,13 @@ name: Deploy Production
 # image tag already validated in staging. Gated by the `production` GitHub
 # Environment, which requires manual approval before any prod change happens.
 on:
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       image_tag:
         description: 'Backend image tag to promote (the 7-char SHA already in ECR and tested in staging)'
-        required: true
+        required: false
 
 concurrency:
   group: deploy-prod
@@ -33,6 +35,24 @@ jobs:
     environment: production # requires reviewer approval (configured in repo settings)
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Resolve backend image tag
+        id: resolve
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            IMAGE_TAG="${{ inputs.image_tag }}"
+            if [ -z "$IMAGE_TAG" ]; then
+              echo "workflow_dispatch requires 'image_tag' input."
+              exit 1
+            fi
+          else
+            RELEASE_TAG="${{ github.event.release.tag_name }}"
+            RELEASE_SHA="$(git rev-list -n 1 "$RELEASE_TAG")"
+            IMAGE_TAG="${RELEASE_SHA:0:7}"
+          fi
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Promoting image tag: $IMAGE_TAG"
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
@@ -41,11 +61,10 @@ jobs:
       - name: Verify image exists in ECR
         run: |
           aws ecr describe-images --repository-name boardly-backend \
-            --image-ids imageTag="${{ inputs.image_tag }}" >/dev/null
-          echo "Promoting image tag: ${{ inputs.image_tag }}"
+            --image-ids imageTag="${{ steps.resolve.outputs.image_tag }}" >/dev/null
       - name: Register new task definition & roll the service
         run: |
-          IMAGE="$ECR_REPO:${{ inputs.image_tag }}"
+          IMAGE="$ECR_REPO:${{ steps.resolve.outputs.image_tag }}"
           aws ecs describe-task-definition --task-definition "$ECS_SERVICE" \
             --query taskDefinition > td.json
           # backend AND worker share the image; swap both, strip read-only fields.
@@ -66,6 +85,9 @@ jobs:
     environment: production
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event_name == 'release' && github.event.release.tag_name || github.ref }}
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ env.AWS_ROLE }}
